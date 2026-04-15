@@ -61,9 +61,12 @@ Run `agent list --json` and check if there are already 2 gemini_cli agents runni
 ```bash
 tmux kill-session -t gemini-dev 2>/dev/null; tmux kill-session -t gemini-qa 2>/dev/null
 PROJECT_DIR=$(pwd)
-tmux new-session -d -s gemini-dev -x 220 -y 50 && tmux send-keys -t gemini-dev:0 "cd $PROJECT_DIR && gemini --yolo" Enter
-tmux new-session -d -s gemini-qa -x 220 -y 50 && tmux send-keys -t gemini-qa:0 "cd $PROJECT_DIR && gemini --yolo" Enter
+HOOKS_DIR="$HOME/.claude/skills/claude-orchestration/hooks"
+tmux new-session -d -s gemini-dev -x 220 -y 50 && tmux send-keys -t gemini-dev:0 "cd $PROJECT_DIR && GEMINI_ROLE=DEV gemini --yolo" Enter
+tmux new-session -d -s gemini-qa -x 220 -y 50 && tmux send-keys -t gemini-qa:0 "cd $PROJECT_DIR && GEMINI_ROLE=QA gemini --yolo" Enter
 ```
+
+> **Hooks**: `GEMINI_ROLE` is read by `before-tool-scope-guard.js` (DEV cannot write test files, QA cannot write impl files). `AfterAgent` hook auto-rejects non-formatted responses — Gemini must reply `DONE | ...` or `NOT_DONE | ...`. Hook config: `hooks/hooks.json` → copy to `<project>/.gemini/hooks.json` before first run.
 
 Wait ~3 seconds, verify both started:
 

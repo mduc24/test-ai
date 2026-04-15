@@ -1,0 +1,14 @@
+{
+  "hooks": [
+    {
+      "event": "AfterAgent",
+      "command": "node ~/.claude/skills/claude-orchestration/hooks/after-agent-format-check.js",
+      "description": "Validates Gemini output format. Rejects prose responses — forces DONE|NOT_DONE format."
+    },
+    {
+      "event": "BeforeTool",
+      "command": "node ~/.claude/skills/claude-orchestration/hooks/before-tool-scope-guard.js",
+      "description": "Blocks write_file/replace calls outside role scope. DEV cannot touch test files, QA cannot touch impl files."
+    }
+  ]
+}
