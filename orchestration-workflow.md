@@ -15,7 +15,7 @@ Your context window is the most scarce resource. Violating these rules causes se
 - **Skip `agent detail` for `running` agents** — status is clear from `agent list`.
 - **Batch parallel detail calls** — call `agent detail` for all agents needing assess in one tool invocation block.
 - **State file is ground truth** — never reconstruct state from conversation history.
-- **Context budget: ~30% orchestrator** — Claude investigates codebase directly (BEFORE FIRST RED) so budget is higher than pure coordination. Agents still do all writing, running, and Trello operations.
+- **Context budget: ~20% orchestrator** — Claude only scans for critical_constraints (fast, targeted). Codebase pattern research is delegated to DEV via codebase_investigator. Agents do all writing, running, research, and Trello operations.
 
 ## State File
 
@@ -348,32 +348,25 @@ Read `dev_agent` and `qa_agent` from state file. Use those names — never guess
 
 ```
 [ROLE] You are GEMINI DEV. Your job is implementation only — do not write or modify tests.
-[TASK] <exactly one task, one sentence>
-[SCOPE] Only touch: <file1>, <file2>. Do NOT touch: <test files>, <migration files>, <other>.
-[PRESERVE] Do NOT delete or weaken existing business logic. Do NOT add bare `except: pass` or `except Exception: pass` without logging. Do NOT use SimpleNamespace or fake objects to satisfy tests. If existing logic blocks your implementation, report it — do not swallow it.
-[DONE WHEN] <clear completion condition> AND changes committed to git
-[REPORT BACK] Reply with exactly: DONE | files: <list> | tests: <pass/fail N/M> | git: <last 2 commit hashes> | deleted_logic: <list any logic you removed or "none"> | notes: <one line>
+[GOAL] <one sentence — what behavior should exist when done, not how to implement it>
+[CONSTRAINT] Do NOT touch test files. Do NOT delete existing conditional branches or permission guards. Do NOT add bare except/pass without logging. If something blocks you, report it — do not swallow it.
+[RESEARCH] Use codebase_investigator to find similar patterns before writing any code. Then enter /plan mode, propose your approach, and proceed after your plan is clear.
+[COMPRESS] Run /compress before starting implementation to keep your context clean.
+[DONE WHEN] <acceptance condition: behavior exists + existing tests pass> AND committed to git
+[REPORT BACK] Reply with exactly: DONE | files: <list> | tests: <pass/fail N/M> | git: <last 2 commit hashes> | deleted_logic: <any logic removed or "none"> | notes: <one line>
 ```
 
-For GEMINI QA swap role line:
+For GEMINI QA swap role and research lines:
 ```
 [ROLE] You are GEMINI QA. Your job is writing tests only — do not implement or modify production code.
-```
-
-QA prompts that reference production code MUST also include:
-```
-[CONTEXT] Re-read <changed_file> now to get the latest version before writing tests — do not rely on what you read earlier in this session.
-```
-
-QA prompts MUST also include:
-```
-[TEST QUALITY] Do NOT wrap the method under test in try/except — if it throws, the test must fail. Assert concrete values (cell content, row numbers), not just "no exception raised". Tests that pass when the production method crashes are invalid.
+[RESEARCH] Re-read <changed_file> now to get the latest version before writing tests — do not rely on earlier session context.
+[TEST QUALITY] Do NOT wrap the method under test in try/except — if it throws, the test must fail. Assert concrete values, not just "no exception raised".
 ```
 
 Flatten to single line when calling `agent send`:
 
 ```bash
-agent send "[ROLE] GEMINI DEV, implement only. [TASK] Add auto_confirm field to OrderItems. [SCOPE] Only touch: api/models/universal/orderitems.py. Do NOT touch tests. [DONE WHEN] Field exists and existing tests still pass. [REPORT BACK] DONE | files: <list> | tests: pass/fail N/M | git: <last 2 commit hashes>" --id gemini-dev
+agent send "[ROLE] GEMINI DEV, implement only. [GOAL] Add auto_confirm field to OrderItems with portal-specific behavior consistent with existing portal-based fields. [CONSTRAINT] Do NOT touch test files. Do NOT delete existing branches. [RESEARCH] Use codebase_investigator to find how similar portal fields are implemented first, then /plan your approach. [COMPRESS] Run /compress before coding. [DONE WHEN] Field exists, existing tests pass, committed. [REPORT BACK] DONE | files: <list> | tests: pass/fail N/M | git: <last 2 hashes> | deleted_logic: none" --id gemini-dev
 ```
 
 **Log every prompt sent** — append to `.claude/orchestration-prompt-log.jsonl` immediately after each send:
@@ -587,7 +580,7 @@ After user confirms, run the anti-patterns gate (step 0) then enter loop at step
 
 When user provides Trello card link:
 
-### Pre-flight (Trello + memory + design → delegate to DEV. Codebase investigation → Claude does in BEFORE FIRST RED)
+### Pre-flight (Trello + memory + design → delegate to DEV. Codebase pattern research → delegate to DEV via codebase_investigator. Claude only scans for critical_constraints before first RED.)
 
 1. **Send combined research task to GEMINI DEV** (DEV có thể chạy parallel sub-agents cho các area độc lập — ví dụ Trello + Google Sheets + codebase cùng lúc, chỉ cần nói rõ trong prompt):
 
@@ -626,52 +619,63 @@ curl -X POST "https://api.trello.com/1/checklists/{checklistId}/checkItems" -d "
 ### Orchestration Loop (BE task)
 
 ```
-BEFORE FIRST RED — Claude investigates target method directly:
-→ Claude reads key files with targeted line ranges (Grep + Read with offset/limit).
-→ Claude identifies: (1) all conditional branches (if is_vendor, if portal == ..., permission guards), (2) existing business logic that must be preserved, (3) edge cases and niche paths (not just happy path).
-→ Gemini traces happy paths only — do NOT delegate this step to DEV. Claude must own the full picture before writing specs.
-→ Claude compiles must_preserve list from its own reading, saves to state file under current behavior key.
-→ Claude also builds must_follow list: search codebase for similar features (e.g., if adding a layout variant, find how other layout variants are structured; if adding a flag-driven branch, find how similar flags are handled). Identify: (1) whether similar cases use subclass vs flag, (2) whether similar constants are named, (3) whether similar logic is extracted into helper methods. Save to state file under must_follow key.
-→ Pass must_preserve to QA as [CONTEXT] and to DEV as [PRESERVE] in all subsequent prompts.
-→ Pass must_follow to DEV as [FOLLOW PATTERN] in all subsequent prompts — DEV must match existing project conventions, not invent new ones.
+BEFORE FIRST RED — Claude scans only for critical constraints (fast, targeted):
+→ Claude reads ONLY the target file/method to identify: (1) dangerous patterns to never delete
+   (permission guards, is_vendor branches, portal conditionals), (2) file path and method signature.
+→ Save as `critical_constraints` in state file — this is a short list, not a full analysis.
+→ Do NOT read similar files or build must_follow list — delegate that to DEV via codebase_investigator.
     ↓
 GEMINI QA: Write failing test (RED)
-→ test must fail for the right reason
-→ QA prompt MUST include [TEST QUALITY] rule (no try/except around method under test)
+→ Send [GOAL] describing the behavior to test, [RESEARCH] to re-read the target file first
+→ QA prompt MUST include [TEST QUALITY] rule (no try/except, assert concrete values)
+→ test must fail for the right reason — if it passes immediately, QA wrote a bad test
     ↓
-GEMINI DEV: Implement minimum code (GREEN)
-→ only what the test requires
-→ DEV prompt MUST include [PRESERVE] list from research step
+GEMINI DEV: Research + Plan + Implement (GREEN)
+→ [RESEARCH] instructs DEV to use codebase_investigator to find similar patterns first
+→ [COMPRESS] before coding to clear conversation noise
+→ DEV proposes plan via /plan, then implements minimum code to pass the test
+→ [CONSTRAINT] includes critical_constraints from state file (short list only)
     ↓
 CLAUDE: Verify — three steps, all mandatory:
-  Step 1 — ask DEV to run tests:
-    → send: "[TASK] Run the test suite now using quiet flags to reduce output (e.g. pytest -x -q). [REPORT BACK] DONE | tests: pass/fail N/M | git: <last 2 commit hashes> | errors: <exact failure lines>"
+  Step 1 — check git log:
+    → run: `git log --oneline -3`
+    → no new commit = not done. Ask DEV for exact error before retrying.
   Step 2 — Claude reads diff directly (non-negotiable):
     → run: `git diff HEAD~1 HEAD -- <changed_prod_file>`
-    → scan deleted lines (-) for: bare `except`, `SimpleNamespace`, any conditional branch from must_preserve list
-    → if dangerous deletion found → send corrective instruction to DEV, do NOT tick Trello yet
-  Step 3 — check git log:
-    → no new commit = not done
-→ all 3 pass: delegate Trello ticking to GEMINI DEV — send: "[TASK] Tick 2 Trello checklist items as complete. Run: curl -s -o /dev/null -X PUT 'https://api.trello.com/1/cards/{cardId}/checkItem/{redItemId}' -d 'key=$TRELLO_API_KEY&token=$TRELLO_TOKEN&state=complete' && curl -s -o /dev/null -X PUT 'https://api.trello.com/1/cards/{cardId}/checkItem/{greenItemId}' -d 'key=$TRELLO_API_KEY&token=$TRELLO_TOKEN&state=complete' [DONE WHEN] Both curl calls return without error. [REPORT BACK] DONE | ticked: <item names>" — then continue
-→ any fail: send exact error/finding to GEMINI DEV to fix
-(repeat RESEARCH→RED→GREEN→VERIFY→TICK for each behavior)
+    → scan deleted lines (-) for items in critical_constraints list
+    → if dangerous deletion found → send corrective [GOAL] to DEV to restore, do NOT tick Trello yet
+  Step 3 — check pattern consistency (fast):
+    → scan diff for: bare `except: pass`, `SimpleNamespace`, fake objects
+    → if found → send corrective instruction to DEV
+→ all 3 pass: ask DEV to run tests, then delegate Trello ticking:
+    send: "[GOAL] Run pytest -x -q and report results. Then tick these 2 Trello items complete:
+    curl -X PUT 'https://api.trello.com/1/cards/{cardId}/checkItem/{redItemId}' -d 'key=$TRELLO_API_KEY&token=$TRELLO_TOKEN&state=complete'
+    curl -X PUT 'https://api.trello.com/1/cards/{cardId}/checkItem/{greenItemId}' -d 'key=$TRELLO_API_KEY&token=$TRELLO_TOKEN&state=complete'
+    [DONE WHEN] Tests pass + both curl calls succeed. [REPORT BACK] DONE | tests: N/M | ticked: <names>"
+→ any fail: send exact finding to DEV as corrective [GOAL]
+(repeat for each behavior)
     ↓
-CLAUDE: Code quality review — read full diff of all changed production files:
+CLAUDE: Code quality review — read full diff of changed production files:
 → run: git diff main -- <all changed prod files>
-→ check against must_follow list: pattern inconsistency, structure deviating from similar features
-→ check for: duplicate logic (same calculation/string-building in multiple methods), magic numbers without named constants, dead code (assignments never read), consecutive if-blocks for same flag that can be merged
-→ compile specific issue list — exact method/line, not generic. Skip issues already fixed.
-→ send targeted refactor instruction to DEV: "[TASK] Refactor production code — fix these specific issues: <numbered list>. [SCOPE] Only touch: <prod files>. Do NOT touch tests. [DONE WHEN] Each issue resolved and tests still pass. [REPORT BACK] DONE | fixed: <list> | git: <last 2 hashes>"
-→ send targeted refactor instruction to QA: "[TASK] Refactor test code — fix these specific issues: <numbered list>. [SCOPE] Only touch: <test files>. Do NOT touch production code. [DONE WHEN] Each issue resolved and tests still pass."
+→ check for: duplicate logic, magic numbers, dead code, consecutive if-blocks for same flag
+→ compile specific issue list — exact method/line. Skip issues already fixed.
+→ send DEV refactor first (sequential, not parallel):
+    "[GOAL] Refactor production code to fix: <numbered list>. Do NOT touch test files.
+    [DONE WHEN] Each issue resolved, tests still pass, committed."
+→ after DEV commits, send QA refactor:
+    "[GOAL] Refactor test code to fix: <numbered list>. Do NOT touch production code.
+    [DONE WHEN] Each issue resolved, tests still pass, committed."
 → if no issues found: skip refactor, proceed to regression
-GEMINI DEV: Refactor production code — fix each item in Claude's checklist
-GEMINI QA: Refactor test code — fix each item in Claude's checklist
-→ run tests after every change (delegate to GEMINI DEV)
     ↓
 GEMINI QA: Regression — full test suite
     ↓
-GEMINI DEV: Squash TDD micro-commits into 3 semantic commits:
-→ send: "[TASK] Squash all commits on this branch into exactly 3 commits using git rebase -i main. Commit order and messages: (1) test(<scope>): <feature description> — contains all test file changes, (2) feat(<scope>): <feature description> — contains all production code changes, (3) refactor(<scope>): clean up <feature description> — contains refactor-only changes. If refactor is empty, use 2 commits only. [DONE WHEN] git log main..HEAD --oneline shows 2-3 commits matching this format. [REPORT BACK] DONE | commits: <git log main..HEAD --oneline output>"
+GEMINI DEV: Squash commits using merge --squash (safer than rebase -i):
+→ send: "[GOAL] Squash all feature commits into 2-3 semantic commits.
+    Run: git log main..HEAD --oneline to see commits, then use git merge --squash approach:
+    git checkout main && git checkout -b <branch>-clean && git merge --squash <branch>
+    git commit -m 'feat(<scope>): <description>'
+    Alternatively use git rebase -i main if you prefer — your choice.
+    [DONE WHEN] git log main..HEAD --oneline shows 2-3 clean commits. [REPORT BACK] DONE | commits: <log output>"
     ↓
 GEMINI DEV: Report git diff summary — run: git diff main --stat and git log main..HEAD --oneline, report changed files and commit messages
     ↓
